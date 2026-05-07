@@ -464,25 +464,20 @@ def _sarvam_translate(text: str, source_lang: str, target_lang: str) -> str:
     return text  # Fail-safe: return original
 
 def generate_tts(text: str, lang: str) -> str:
-    """Synthesise verification prompt via Sarvam TTS (primary) or Edge TTS (fallback)."""
+    """Synthesise verification prompt via Edge TTS (primary, English always).
+    For English content, always uses Edge TTS with en-IN-NeerjaNeural.
+    For other languages, uses the mapped Edge TTS voice.
+    Sarvam TTS has been removed due to API errors (HTTP 400).
+    """
     if MOCK_MODE:
         logger.info("[MOCK] generate_tts() -> writing stub verify.mp3.")
         with open(TTS_OUTPUT_PATH, "wb") as f:
             f.write(b"")  # zero-byte stub
         return TTS_OUTPUT_PATH
 
-    logger.info("TTS: lang=%s, chars=%d", lang, len(text))
+    logger.info("[EDGE TTS] lang=%s, chars=%d", lang, len(text))
 
-    # Try Sarvam TTS first (native Indian voices)
-    audio_bytes = _sarvam_tts(text, lang)
-    if audio_bytes:
-        with open(TTS_OUTPUT_PATH, "wb") as f:
-            f.write(audio_bytes)
-        logger.info("[SARVAM TTS] Saved to %s", TTS_OUTPUT_PATH)
-        return TTS_OUTPUT_PATH
-
-    # Fallback to Edge TTS
-    logger.info("[EDGE TTS FALLBACK] Trying Edge TTS...")
+    # Always use Edge TTS — pick voice by language, fallback to English Indian voice
     voice = TTS_VOICE_MAP.get(lang.lower().strip(), TTS_FALLBACK_VOICE)
     try:
         try:
@@ -496,17 +491,17 @@ def generate_tts(text: str, lang: str) -> str:
         except RuntimeError:
             asyncio.run(_tts_coroutine(text, voice, TTS_OUTPUT_PATH))
 
-        logger.info("TTS saved to %s", TTS_OUTPUT_PATH)
+        logger.info("[EDGE TTS] Saved to %s (voice=%s)", TTS_OUTPUT_PATH, voice)
         return TTS_OUTPUT_PATH
 
     except Exception as exc:
-        logger.warning("TTS failed with voice %s: %s — retrying with fallback.", voice, exc)
+        logger.warning("[EDGE TTS] Failed with voice %s: %s — retrying with fallback.", voice, exc)
         try:
             asyncio.run(_tts_coroutine(text, TTS_FALLBACK_VOICE, TTS_OUTPUT_PATH))
-            logger.info("TTS fallback succeeded.")
+            logger.info("[EDGE TTS] Fallback succeeded.")
             return TTS_OUTPUT_PATH
         except Exception as fallback_exc:
-            logger.error("TTS fallback also failed: %s", fallback_exc)
+            logger.error("[EDGE TTS] Fallback also failed: %s", fallback_exc)
             return TTS_OUTPUT_PATH
 
 def _sarvam_stt_original(audio_path: str) -> str:

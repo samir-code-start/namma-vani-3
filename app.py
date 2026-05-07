@@ -119,32 +119,62 @@ def _render_header():
     st.markdown('''<div class="nav-bar"><div class="nav-brand-group"><div style="display:flex;align-items:center;gap:12px;"><div class="nav-icon-bg">📞</div><h1 style="margin:0;font-family:'Syne',sans-serif;font-weight:800;font-size:18px;color:var(--text-primary);line-height:1.2;">Namma Vanni — <span style="color:var(--accent-red)">1092</span> AI Helpline</h1></div><p style="margin:6px 0 0 50px;font-size:12px;color:var(--text-secondary);letter-spacing:0.3px;">Voice-to-voice citizen assistant for Karnataka</p></div><div class="nav-badge">LIVE</div></div>''', unsafe_allow_html=True)
 
 def parse_smart_confirmation(transcript: str) -> dict:
-    """Handles conversational Yes/No/Partial (e.g., 'Yes but the location is wrong')."""
-    t = transcript.strip().lower()
+    """LLM-based confirmation parser using Llama (via Groq).
+    Sends the citizen's spoken response to the LLM to determine intent:
+    confirmed / denied / partial / unclear.
+    Falls back to simple keyword matching only if LLM call fails.
+    """
+    from engine import _sarvam_chat
+    import json, re as _re
 
-    pos_cluster = ["yes", "yeah", "yep", "correct", "right", "okay", "ok", "haan", "hān", "sari", "sha"]
-    neg_cluster = ["no", "nahi", "galat", "wrong", "naahi", "illa", "thappilla", "kadliya"]
-    partial_cluster = ["but", "almost", "mostly", "partially", "partly", "not fully",
-                       "not exactly", "haan par", "haan lekin", "sari aadre", "yes but",
-                       "thoda", "kuch", "aadre"]
+    t = transcript.strip()
+    if not t:
+        return {"intent": "unclear"}
 
-    pos_hits = [w for w in pos_cluster if w in t]
-    neg_hits = [w for w in neg_cluster if w in t]
-    partial_hits = [w for w in partial_cluster if w in t]
+    system_prompt = (
+        "You are a helpline confirmation parser. "
+        "A citizen was asked to confirm an AI summary of their civic complaint. "
+        "They responded with a spoken sentence. "
+        "Determine their intent from their response. "
+        "Reply ONLY with valid JSON — no explanation, no markdown. "
+        "Format: {\"intent\": \"confirmed\" | \"denied\" | \"partial\" | \"unclear\", \"reason\": \"one-line explanation\"}\n\n"
+        "Rules:\n"
+        "- 'confirmed': citizen agrees the summary is correct (yes, correct, right, haan, sari, etc.)\n"
+        "- 'denied': citizen disagrees entirely (no, wrong, galat, illa, not right, etc.)\n"
+        "- 'partial': citizen partially agrees but adds corrections (yes but..., almost, not fully, haan lekin, etc.)\n"
+        "- 'unclear': response is ambiguous, too short, or unrelated"
+    )
 
-    # Check partial FIRST ("yes but..." should be partial, not confirmed)
-    if len(partial_hits) > 0 and len(pos_hits) > 0:
+    try:
+        raw = _sarvam_chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Citizen's spoken response: \"{t}\""},
+            ],
+            temperature=0.1,
+            max_tokens=80,
+        )
+        match = _re.search(r'\{.*\}', raw, _re.DOTALL)
+        if match:
+            result = json.loads(match.group())
+            intent = result.get("intent", "unclear")
+            if intent in ("confirmed", "denied", "partial", "unclear"):
+                return {"intent": intent}
+    except Exception:
+        pass  # Fall through to keyword fallback
+
+    # Lightweight keyword fallback if LLM call fails
+    tl = t.lower()
+    pos = any(w in tl for w in ["yes", "yeah", "correct", "right", "okay", "haan", "sari"])
+    neg = any(w in tl for w in ["no", "nahi", "wrong", "galat", "illa"])
+    part = any(w in tl for w in ["but", "almost", "partially", "not fully", "haan lekin"])
+
+    if part and pos:
         return {"intent": "partial"}
-
-    if len(pos_hits) >= 1 and len(neg_hits) == 0: return {"intent": "confirmed"}
-    if len(neg_hits) >= 1 and len(pos_hits) == 0: return {"intent": "denied"}
-
-    positive_phrases = ["sounds right", "did i understand correctly", "that is correct", "you got it", "exactly", "bilkul sahi"]
-    negative_phrases = ["not exactly", "wrong", "missed", "try again", "not what i said"]
-
-    if any(p in t for p in positive_phrases): return {"intent": "confirmed"}
-    if any(p in t for p in negative_phrases): return {"intent": "denied"}
-
+    if pos and not neg:
+        return {"intent": "confirmed"}
+    if neg and not pos:
+        return {"intent": "denied"}
     return {"intent": "unclear"}
 
 # ---------------------------------------------------------------------------
@@ -249,12 +279,23 @@ elif st.session_state.stage == "verify":
             <div><span class="section-label">Voice Playback ({lang_label})</span><p style="margin:0;font-style:italic;color:var(--text-primary) !important;line-height:1.5;">"{translated_prompt}"</p></div>
         </div>''', unsafe_allow_html=True)
 
-    # --- PLAYBACK (no key= args to prevent TypeError) ---
+    # --- PLAYBACK with HTML autoplay (bypasses Streamlit no-autoplay restriction) ---
     if not tts_path or not os.path.isfile(tts_path):
         st.error("Voice summary missing.")
     else:
-        st.info("👇 Listen to the AI summary:")
-        st.audio(tts_path)
+        import base64
+        with open(tts_path, "rb") as audio_file:
+            audio_b64 = base64.b64encode(audio_file.read()).decode("utf-8")
+        st.markdown(
+            f"""
+            <div style="margin:12px 0;">
+                <audio controls autoplay style="width:100%;border-radius:8px;">
+                    <source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3">
+                </audio>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     # --- RECORDING ---
     conf_audio = st.audio_input("🎙️ Say 'Yes' or 'No'...", key="final_mic_ver")
